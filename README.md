@@ -15,8 +15,7 @@ Cross-tenant file sharing depends on Drive policies in **both** our tenant and t
    `single-file/appsscript.json` kept in an internal Drive folder or Doc shared only with PMs.
 2. **PM, separate browser profile signed in as the customer super admin:** create a blank Google Sheet → Extensions → Apps Script.
 3. Project Settings (gear icon) → tick **Show "appsscript.json" manifest file in editor**.
-4. Editor: replace the contents of `appsscript.json` with the one from the provided file, add a new script file, name it `Code.gs` and add the content of the provided file. Save. Reload the Sheet and the
-   **Migration Mapping** menu appears.
+4. Editor: replace the contents of `appsscript.json` with those from the provided file. Then, add a new script file named `Code.gs`, paste in the contents of the provided file, and save the changes. Reload the Sheet and the **Migration Mapping** menu appears.
 
 The script is created by the customer's own admin, so it is an internal app: no OAuth verification and no unverified-app cap.
 
@@ -56,6 +55,6 @@ the next step is a "Provision destination" menu for the destination tenant. It w
   provisioning time.
 
 ## Testing status
-- Initial testing with this version of the tool successfully retrieved information from the source tenant.
-- Most sections of the current PP have been successfully filled.
-- Pending to polish a few details in the PM > ENG deliverables handoff.
+- Initial testing of this version of the tool successfully retrieved information from the source tenant.
+- Most sections of the current project plan (PP) have been populated successfully.
+- A few details in the PM-to-ENG deliverables handoff still need to be polished.
