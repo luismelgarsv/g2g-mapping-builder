@@ -5,7 +5,7 @@ destination. The destination is a 1:1 rebuild of the source on placeholder addre
 
 ```
 single-file/appsscript.json  manifest: scopes + advanced services (Admin SDK Directory, Groups Settings, Drive v3)
-single-file/Code.gs          the three .gs files merged, for the paste install (+ appsscript.json)
+single-file/Code.gs          the three .gs files from v2 merged, for the paste install (+ appsscript.json)
 ```
 
 ## Installing the tool in a customer tenant (default: paste install, about 3 minutes)
