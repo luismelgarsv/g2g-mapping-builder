@@ -1,4 +1,4 @@
-# Google-to-Google Mapping Tool v2 (cloud-only)
+# Google-to-Google Mapping Builder v2.0.1 (cloud-only)
 
 Runs entirely in Google Sheets inside the **source** tenant. Nothing is installed locally and nothing is collected from the
 destination. The destination is a 1:1 rebuild of the source on placeholder addresses (`user@domain` → `user@temp.domain`).
