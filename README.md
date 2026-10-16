@@ -8,7 +8,7 @@ single-file/appsscript.json  manifest: scopes + advanced services (Admin SDK Dir
 single-file/Code.gs          the three .gs files from v2 merged, for the paste install (+ appsscript.json)
 ```
 
-## Installing the tool in a customer tenant (default: paste install, about 3 minutes)
+## Installing the tool in a customer tenant (paste install, about 3 minutes)
 
 1. **PM, own browser profile (Cloudasta account):** open the internal install kit (`single-file` folder), which contains the `Code.gs` and
    `appsscript.json` files.
