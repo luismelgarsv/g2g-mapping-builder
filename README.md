@@ -9,13 +9,12 @@ single-file/Code.gs          the three .gs files from v2 merged, for the paste i
 ```
 
 ## Installing the tool in a customer tenant (default: paste install, about 3 minutes)
-Cross-tenant file sharing depends on Drive policies in **both** our tenant and the customer's, so the default install doesn't use it.
 
-1. **PM, own browser profile (Cloudasta account):** open the internal install kit, which is `single-file/Code.gs` and
-   `single-file/appsscript.json` kept in an internal Drive folder or Doc shared only with PMs.
-2. **PM, separate browser profile signed in as the customer super admin:** create a blank Google Sheet → Extensions → Apps Script.
-3. Project Settings (gear icon) → tick **Show "appsscript.json" manifest file in editor**.
-4. Editor: replace the contents of `appsscript.json` with those from the provided file. Then, add a new script file named `Code.gs`, paste in the contents of the provided file, and save the changes. Reload the Sheet and the **Migration Mapping** menu appears.
+1. **PM, own browser profile (Cloudasta account):** open the internal install kit (`single-file` folder), which contains the `Code.gs` and
+   `appsscript.json` files.
+2. **PM, on a separate browser profile signed in as the customer super admin:** create a blank Google Sheet → Extensions → Apps Script.
+3. Click on Project Settings (gear icon over the left) → and tick **Show "appsscript.json" manifest file in editor**.
+4. Editor: replace the contents of `appsscript.json` with those from the provided file. Then, add a new script file named `Code.gs` and replace the contents as well, once done, save the changes. Reload the Sheet and the **Migration Mapping** menu appears.
 
 The script is created by the customer's own admin, so it is an internal app: no OAuth verification and no unverified-app cap.
 
