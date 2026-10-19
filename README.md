@@ -36,6 +36,11 @@ PM steps are inside the tool (Instructions tab): Settings → 1. Collect → 2. 
 The `dest_*` files are plain CSVs, so you can use them with GAM in the destination or with a provisioning script. If useful,
 the next step is a "Provision destination" menu for the destination tenant. It would create OUs, users, groups, memberships, drives and ACLs from this zip.
 
+## Issues the tool can flag
+- **Users:** suspended, archived, never signed in, inactive for more than N days, super admin, missing first or last name.
+- **Groups:** no members, external members, nested groups, “all users in the organization” as a member, unreadable settings, custom access settings.
+- **Shared drives:** no Manager, external collaborators, domain-wide or public sharing, deleted accounts in the access list, hidden drive, unreadable access list.
+
 ## Behaviour and limits
 - **Resumable collection.** Apps Script caps each run at 6 minutes, so the tool saves its progress about every 4.5 minutes and
   resumes itself 1 minute later. Workspace accounts get 6 hours of trigger runtime per day, which is far more than collection needs.
