@@ -13,6 +13,7 @@
  * The destination is a 1:1 rebuild of the source using placeholder addresses: user@domain -> user@temp.domain.
  * No GCP project, service account, domain-wide delegation or GAM. The script is owned by the tenant's own
  * admin, so it counts as an internal app and needs no OAuth verification.
+ * Created by Luis Melgar.
  */
 
 const TOOL_VERSION = '2.0.1';
@@ -112,8 +113,7 @@ function continueRun() {
 
 const INSTRUCTIONS = [
   ['How to use this tool (Project Managers)', 'title'],
-  ['Before you start: sign in to the browser as the SOURCE tenant super admin (use an incognito/guest window). ' +
-   'Make your own copy of this tool from the master link, then work only in that copy.', ''],
+  ['Before you start: sign in to the browser as the SOURCE tenant super admin (use an incognito/guest window, or a new profile).', ''],
   ['', ''],
   ['Step 0: Settings tab', 'h'],
   ['Fill in "Project / customer name". Change the other settings only if the project uses a different convention ' +
