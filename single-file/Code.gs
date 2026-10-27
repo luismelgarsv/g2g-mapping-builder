@@ -129,8 +129,7 @@ function continueRun() {
 
 const INSTRUCTIONS = [
   ['How to use this tool (Project Managers)', 'title'],
-  ['Before you start: sign in to the browser as the SOURCE tenant super admin (preferably a new profile in Chrome, but you can use an incognito/guest window). ' +
-   'Make your own copy of this tool from the master link, then work only in that copy.', ''],
+  ['Before you start: sign in to the browser as the SOURCE tenant super admin (preferably a new profile in Chrome, but you can use an incognito/guest window). '],
   ['', ''],
   ['Step 0: Settings tab', 'h'],
   ['Fill in "Project / customer name". It is recommended to use the same name defined in HubSpot. Change the other settings only if the project uses a different convention ' +
