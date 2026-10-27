@@ -13,7 +13,6 @@
  * The destination is a 1:1 rebuild of the source using placeholder addresses: user@domain -> user@temp.domain.
  * No GCP project, service account, domain-wide delegation or GAM. The script is owned by the tenant's own
  * admin, so it counts as an internal app and needs no OAuth verification.
- * Created by Luis Melgar - Cloud Migration Engineer at Cloudasta.
  */
 
 const TOOL_VERSION = '2.2.0';
@@ -1037,6 +1036,7 @@ function daysSince_(iso) {
  *                     dest_shared_drives.csv, dest_shared_drive_acl.csv
  *   README.txt        what each file is + every warning raised during export
  * CloudM formats follow CloudM's "Bulk Add/Import Items" and "Address Replacements" articles.
+ * Created by Luis Melgar - Cloud Migration Engineer at Cloudasta.
  */
 
 const EXPORT_IDS_KEY = 'G2G_EXPORT_IDS';
