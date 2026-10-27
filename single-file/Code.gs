@@ -133,7 +133,7 @@ const INSTRUCTIONS = [
    'Make your own copy of this tool from the master link, then work only in that copy.', ''],
   ['', ''],
   ['Step 0: Settings tab', 'h'],
-  ['Fill in "Project / customer name" It is recommended to use the same name defined in HubSpot. Change the other settings only if the project uses a different convention ' +
+  ['Fill in "Project / customer name". It is recommended to use the same name defined in HubSpot. Change the other settings only if the project uses a different convention ' +
    '(the defaults are user@temp.domain.com placeholders and user@archive.domain.com after cutover).', ''],
   ['', ''],
   ['Step 1: Migration Mapping menu → 1. Collect source data', 'h'],
