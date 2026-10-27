@@ -108,7 +108,7 @@ the next step is a "Provision destination" menu for the destination tenant. It w
 ## Testing status
 - ~~Initial testing of this version of the tool successfully retrieved information from the source tenant.~~
 - ~~Most sections of the current project plan (PP) have been populated successfully.~~
-- ~~A few details in the PM-to-ENG deliverables handoff still need to be polished.
+- ~~A few details in the PM-to-ENG deliverables handoff still need to be polished.~~
 
 ## WIP
 - ~~Add Email/Drive usage per user + tenant totals.~~
