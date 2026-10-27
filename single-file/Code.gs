@@ -1,4 +1,4 @@
-// ==== G2G Migration Mapping Tool v2.0.1 — single-file install. Paste this whole file into Code.gs ====
+// ==== G2G Migration Mapping Tool v2.2.0 — single-file install. Paste this whole file into Code.gs ====
 
 // ================================================================ Main.gs
 /**
@@ -13,10 +13,10 @@
  * The destination is a 1:1 rebuild of the source using placeholder addresses: user@domain -> user@temp.domain.
  * No GCP project, service account, domain-wide delegation or GAM. The script is owned by the tenant's own
  * admin, so it counts as an internal app and needs no OAuth verification.
- * Created by Luis Melgar.
+ * Created by Luis Melgar - Cloud Migration Engineer at Cloudasta.
  */
 
-const TOOL_VERSION = '2.0.1';
+const TOOL_VERSION = '2.2.0';
 const TIME_BUDGET_MS = 4.5 * 60 * 1000;   // Apps Script hard limit is 6 min per execution
 const STATE_KEY = 'G2G_STATE';
 const REVIEW_ID_KEY = 'G2G_REVIEW_ID';
@@ -36,7 +36,21 @@ const SETTINGS = [
   ['exportUrl', 'Last export (.zip) URL', '', 'Filled by step 3'],
 ];
 
-const PHASES = ['runinfo', 'domains', 'orgunits', 'users', 'groups', 'members', 'settings', 'drives', 'perms'];
+const PHASES = ['runinfo', 'domains', 'orgunits', 'users', 'tenantusage', 'userusage', 'licenses', 'groups', 'members', 'settings',
+                'drives', 'perms'];
+
+// Admin SDK Reports API (usage). Data is dated in Pacific time and lags 1–3 days, so we walk back to the newest
+// date that has data. Usage is optional: if the Reports API fails, collection continues without it.
+const USAGE_LOOKBACK_DAYS = 7;
+// Photos is deliberately not requested: we don't migrate it. "Quota used %" is Google's figure and still includes all Google storage.
+const USER_USAGE_PARAMS = ['gmail_used_quota_in_mb', 'drive_used_quota_in_mb', 'total_quota_in_mb', 'used_quota_in_percentage'];
+// used_quota_in_mb is requested only as the "data is ready for this date" signal; it includes Photos so it isn't displayed.
+const TENANT_USAGE_PARAMS = ['used_quota_in_mb', 'total_quota_in_mb', 'gmail_used_quota_in_mb', 'drive_used_quota_in_mb',
+  'team_drive_used_quota_in_mb', 'num_users', 'num_users_used_quota_ge_80percent', 'num_users_used_quota_ge_50_lt_80percent',
+  'num_archived_users', 'num_suspended_users'];
+
+// Enterprise License Manager. Workspace plans, Archived User, and Cloud Identity (users with no Workspace plan).
+const LICENSE_PRODUCTS = ['Google-Apps', '101034', '101001', '101005'];
 
 const RAW = {
   runinfo:  { name: 'RUN_Info', headers: ['key', 'value'] },
@@ -59,6 +73,9 @@ const RAW = {
   drives:   { name: 'RAW_SharedDrives', headers: ['driveId', 'name', 'createdTime', 'hidden', 'orgUnitId',
               'adminManagedRestrictions', 'copyRequiresWriterPermission', 'domainUsersOnly',
               'driveMembersOnly', 'sharingFoldersRequiresOrganizerPermission'] },
+  tenantusage: { name: 'RAW_TenantUsage', headers: ['metric', 'value'] },
+  userusage: { name: 'RAW_UserUsage', headers: ['email', 'gmailMB', 'driveMB', 'quotaMB', 'usedPct', 'reportDate'] },
+  licenses: { name: 'RAW_Licenses', headers: ['email', 'productId', 'productName', 'skuId', 'skuName', 'error'] },
   perms:    { name: 'RAW_DrivePermissions', headers: ['driveId', 'driveName', 'type', 'role', 'emailAddress',
               'domain', 'displayName', 'deleted', 'permissionId', 'error'] },
 };
@@ -113,10 +130,11 @@ function continueRun() {
 
 const INSTRUCTIONS = [
   ['How to use this tool (Project Managers)', 'title'],
-  ['Before you start: sign in to the browser as the SOURCE tenant super admin (use an incognito/guest window, or a new profile).', ''],
+  ['Before you start: sign in to the browser as the SOURCE tenant super admin (preferably a new profile in Chrome, but you can use an incognito/guest window). ' +
+   'Make your own copy of this tool from the master link, then work only in that copy.', ''],
   ['', ''],
   ['Step 0: Settings tab', 'h'],
-  ['Fill in "Project / customer name". Change the other settings only if the project uses a different convention ' +
+  ['Fill in "Project / customer name" It is recommended to use the same name defined in HubSpot. Change the other settings only if the project uses a different convention ' +
    '(the defaults are user@temp.domain.com placeholders and user@archive.domain.com after cutover).', ''],
   ['', ''],
   ['Step 1: Migration Mapping menu → 1. Collect source data', 'h'],
@@ -125,7 +143,7 @@ const INSTRUCTIONS = [
    'Check the "Status" row on the Settings tab. It says "Collected …" when finished.', ''],
   ['', ''],
   ['Step 2: Migration Mapping menu → 2. Build review spreadsheet', 'h'],
-  ['This creates a separate spreadsheet for the client. Check the "Issues to Resolve" tab first and fix or explain anything you can. ' +
+  ['This creates a separate spreadsheet for the client that can be customized before sharing. Check the "Issues to Resolve" tab first and fix or explain anything you can. ' +
    'Then share it with the client approver (Share button), or File → Download → Microsoft Excel and email it.', ''],
   ['The client sets Migrate? to Yes or No on every row, corrects the yellow columns, and fills in the sign-off on the first tab.', ''],
   ['If the client sends back an Excel file instead of editing online: upload it to Drive, open it with Google Sheets, ' +
@@ -234,15 +252,76 @@ function runLoop_() {
     const ss = SpreadsheetApp.getActive();
     Object.keys(RAW).forEach(k => { const sh = ss.getSheetByName(RAW[k].name); if (sh) sh.hideSheet(); });
     const c = n => Math.max(0, (ss.getSheetByName(RAW[n].name).getLastRow() || 1) - 1);
+    const usageInfo = {};
+    readRaw_('tenantusage').forEach(r => { usageInfo[r.metric] = r.value; });
+    const usageNote = usageInfo.status === 'OK' ? `storage as of ${usageInfo.reportDate}` : 'storage usage unavailable';
     setSetting_('status', `Collected ${new Date().toISOString().slice(0, 16)}Z: ${c('users')} users, ${c('groups')} groups, ` +
-                          `${c('drives')} shared drives. Next: step 2.`);
+                          `${c('drives')} shared drives, ${usageNote}. Next: step 2.`);
     notify_('Collection complete. Next: Migration Mapping → 2. Build review spreadsheet.');
   } finally {
     lock.releaseLock();
   }
 }
 
+/** Reads a usage report's parameter list into {name: number|string}, dropping the "accounts:" prefix. */
+function usageParams_(report) {
+  const out = {};
+  ((report && report.parameters) || []).forEach(p => {
+    const k = String(p.name).replace(/^accounts:/, '');
+    out[k] = p.intValue !== undefined ? Number(p.intValue) : (p.stringValue !== undefined ? p.stringValue : '');
+  });
+  return out;
+}
+
+function pacificDate_(daysAgo) {
+  return Utilities.formatDate(new Date(Date.now() - daysAgo * 86400000), 'America/Los_Angeles', 'yyyy-MM-dd');
+}
+
 const COLLECT = {
+  /** Finds the newest date with tenant usage data and stores tenant totals. Never fails the run. */
+  tenantusage: function (state) {
+    const params = TENANT_USAGE_PARAMS.map(p => 'accounts:' + p).join(',');
+    const tried = [];
+    for (let d = 1; d <= USAGE_LOOKBACK_DAYS; d++) {
+      const date = pacificDate_(d);
+      try {
+        const res = call_(() => AdminReports.CustomerUsageReports.get(date, { parameters: params }));
+        const vals = usageParams_((res.usageReports || [])[0]);
+        if (vals.used_quota_in_mb === undefined || vals.used_quota_in_mb === '') { tried.push(`${date}: no data yet`); continue; }
+        const rows = [['reportDate', date], ['status', 'OK']];
+        TENANT_USAGE_PARAMS.forEach(p => rows.push([p, vals[p] === undefined ? '' : vals[p]]));
+        appendRows_('tenantusage', rows);
+        return true;
+      } catch (e) {
+        tried.push(`${date}: ${e.message}`);
+        // Permission/disabled errors won't improve on older dates; stop early.
+        if (/permission|not authorized|forbidden|access denied|disabled/i.test(e.message)) break;
+      }
+    }
+    appendRows_('tenantusage', [['reportDate', ''], ['status', 'UNAVAILABLE'], ['detail', tried.join(' | ').slice(0, 45000)]]);
+    return true;
+  },
+
+  /** Per-user storage for the date found by tenantusage. Never fails the run. */
+  userusage: function (state, deadline) {
+    const info = {};
+    readRaw_('tenantusage').forEach(r => { info[r.metric] = r.value; });
+    const date = info.reportDate;
+    if (!date) return true;
+    const params = USER_USAGE_PARAMS.map(p => 'accounts:' + p).join(',');
+    try {
+      return paginate_(state, deadline, token =>
+        call_(() => AdminReports.UserUsageReport.get('all', date, { parameters: params, maxResults: 500, pageToken: token })),
+        res => (res.usageReports || []).filter(r => r.entity && r.entity.userEmail).map(r => {
+          const v = usageParams_(r);
+          return [String(r.entity.userEmail).toLowerCase()].concat(USER_USAGE_PARAMS.map(p => v[p] === undefined ? '' : v[p]), [date]);
+        }), 'userusage');
+    } catch (e) {
+      appendRows_('tenantusage', [['userUsageError', e.message]]);
+      return true;
+    }
+  },
+
   runinfo: function (state) {
     appendRows_('runinfo', [['toolVersion', TOOL_VERSION], ['runAs', Session.getEffectiveUser().getEmail()],
                             ['startedAt', state.startedAt]]);
@@ -279,6 +358,27 @@ const COLLECT = {
         (u.aliases || []).join(';'), (u.nonEditableAliases || []).join(';'),
         u.creationTime || '', u.lastLoginTime || '', !!u.isMailboxSetup, !!u.isEnrolledIn2Sv, u.customerId || '', u.id,
       ]), 'users');
+  },
+
+  /** Licence assignments per product. A product the customer doesn't have may error; that's recorded, never fatal. */
+  licenses: function (state, deadline) {
+    const cust = (readRaw_('users').find(u => u.customerId) || {}).customerId;
+    if (!cust) { appendRows_('licenses', [['', '', '', '', '', 'No customer ID found on any user']]); return true; }
+    return perItem_(state, deadline, LICENSE_PRODUCTS, (productId) => {
+      const rows = [];
+      let token;
+      try {
+        do {
+          const res = call_(() => AdminLicenseManager.LicenseAssignments.listForProduct(productId, cust, { maxResults: 500, pageToken: token }));
+          (res.items || []).forEach(a => rows.push([String(a.userId || '').toLowerCase(), a.productId || productId,
+            a.productName || '', a.skuId || '', a.skuName || '', '']));
+          token = res.nextPageToken;
+        } while (token);
+        return rows;
+      } catch (e) {
+        return [['', productId, '', '', '', e.message]];
+      }
+    }, 'licenses');
   },
 
   groups: function (state, deadline) {
@@ -458,11 +558,12 @@ function notify_(msg) {
 const DRIVE_ROLE = { organizer: 'Manager', fileOrganizer: 'Content manager', writer: 'Contributor',
                      commenter: 'Commenter', reader: 'Viewer' };
 const GROUP_ROLE = { OWNER: 'Owner', MANAGER: 'Manager', MEMBER: 'Member' };
+const QUOTA_FLAG_PCT = 80;   // flag users at or above this % of their storage quota
 
 // Review tab names — Export.gs reads these back, keep stable.
 const T = { readme: 'Read Me & Sign-off', users: 'Google User Mapping', groups: 'Groups (Summary)',
             gmembers: 'GroupsDLs Mapping', memberships: 'User Memberships', drives: 'Shared Drives (Summary)',
-            dacl: 'Shared Drive Mapping', ous: 'Org Units', issues: 'Issues to Resolve' };
+            dacl: 'Shared Drive Mapping', ous: 'Org Units', aliases: 'Aliases', storage: 'Storage Summary', issues: 'Issues to Resolve' };
 
 // [header, kind, width]  kind: g = generated (navy, warn on edit), c = client reviews/edits (yellow), i = internal (grey)
 const COLS = {
@@ -470,13 +571,14 @@ const COLS = {
     ['[Source] Original Google Account', 'g', 240], ['[Destination] Temp Google Account', 'g', 260],
     ['[Destination] Final Google Account', 'g', 240], ['OU Path', 'g', 300],
     ['[Source] Email address after cutover', 'g', 260], ['Email', 'c', 60], ['Contacts', 'c', 70],
-    ['Calendar', 'c', 70], ['Drive', 'c', 60], ['Email Alias in [Destination] Google Workspace', 'c', 220],
+    ['Calendar', 'c', 70], ['Drive', 'c', 60], ['Google Workspace licence', 'g', 220],
     ['Email Forwarding [Destination]', 'c', 180], ['Account status', 'g', 100], ['Last sign-in', 'g', 100],
+    ['Gmail (GB)', 'g', 90], ['Drive (GB)', 'g', 90], ['Gmail + Drive (GB)', 'g', 100], ['Quota used % (all Google storage)', 'g', 130],
     ['Client Comments', 'c', 220], ['Status', 'i', 100], ['Cloudasta Comments', 'i', 220], ['Flags', 'g', 320]],
   groups: [['Migrate?', 'c', 80], ['Group Name', 'g', 200], ['[Source] Group email', 'g', 260],
     ['[Destination] Temp group email', 'g', 280], ['Description', 'g', 200], ['Group access type (derived)', 'g', 140],
     ['Do you need external users to send emails to the group?', 'c', 170], ['Direct members', 'g', 80],
-    ['Group aliases', 'g', 200], ['Client Comments', 'c', 220], ['Flags', 'g', 300]],
+    ['Aliases (see Aliases tab)', 'g', 110], ['Client Comments', 'c', 220], ['Flags', 'g', 300]],
   gmembers: [['Group Name', 'g', 200], ['Group email address', 'g', 260], ['[Destination] Temp group email', 'g', 280],
     ['Group access type', 'g', 130], ['Do you need external users to send emails to the group?', 'g', 160],
     ['Group member email address', 'g', 240], ['[Destination] Member email', 'g', 260], ['Member type', 'g', 130],
@@ -493,6 +595,10 @@ const COLS = {
     ['Client Comments', 'c', 220]],
   ous: [['OU Path', 'g', 420], ['Name', 'g', 200], ['Parent OU', 'g', 360], ['Description', 'g', 240],
     ['Users in OU', 'g', 90]],
+  aliases: [['[Source] Target (user or group)', 'g', 260], ['[Source] Alias', 'g', 260], ['Target type', 'g', 90],
+    ['Alias type', 'g', 170], ['[Destination] Target', 'g', 280], ['[Destination] Alias', 'g', 280],
+    ['Migrate alias?', 'c', 110], ['Client Comments', 'c', 220], ['Flags', 'g', 320]],
+  storage: [['Metric', 'g', 380], ['Value', 'g', 200], ['Notes', 'g', 460]],
   issues: [['Severity', 'g', 80], ['Area', 'g', 110], ['Object', 'g', 300], ['Issue', 'g', 420],
     ['Recommended action', 'g', 420]],
 };
@@ -523,7 +629,10 @@ function menuBuild() {
   const stamp = Utilities.formatDate(new Date(), 'Etc/UTC', 'yyyy-MM-dd');
   const ss = SpreadsheetApp.create(`${cfg.project} — Migration Mappings for Review (${stamp})`);
   writeReadme_(ss.getSheets()[0], cfg, model);
-  writeTab_(ss, T.users, COLS.users, model.users, { yesno: ['Migrate?'], checkbox: ['Priority?', 'Email', 'Contacts', 'Calendar', 'Drive'] });
+  writeTab_(ss, T.users, COLS.users, model.users, { yesno: ['Migrate?'], checkbox: ['Priority?', 'Email', 'Contacts', 'Calendar', 'Drive'],
+            number: { 'Gmail (GB)': '#,##0.00', 'Drive (GB)': '#,##0.00', 'Gmail + Drive (GB)': '#,##0.00',
+                      'Quota used % (all Google storage)': '0"%"' } });
+  writeTab_(ss, T.aliases, COLS.aliases, model.aliases, { list: { 'Migrate alias?': ['Yes', 'No', 'N/A (automatic)'] } });
   writeTab_(ss, T.groups, COLS.groups.concat(GROUP_SETTING_COLS.map(k => [k, 'g', 150])), model.groups,
             { yesno: ['Migrate?'], list: { 'Do you need external users to send emails to the group?': ['Yes', 'No'] } });
   writeTab_(ss, T.gmembers, COLS.gmembers, model.gmembers, { list: { 'Member role': ['Owner', 'Manager', 'Member'] } });
@@ -531,6 +640,7 @@ function menuBuild() {
   writeTab_(ss, T.drives, COLS.drives, model.drives, { yesno: ['Migrate?'] });
   writeTab_(ss, T.dacl, COLS.dacl, model.dacl, { list: { Role: Object.keys(DRIVE_ROLE).map(k => DRIVE_ROLE[k]) } });
   writeTab_(ss, T.ous, COLS.ous, model.ous, {});
+  writeTab_(ss, T.storage, COLS.storage, model.storage, {});
   writeTab_(ss, T.issues, COLS.issues, model.issues, {});
   ss.setActiveSheet(ss.getSheets()[0]);
 
@@ -562,6 +672,21 @@ function buildModel_(cfg) {
   R.users.forEach(u => splitList_(u.aliases + ';' + u.nonEditableAliases).forEach(a => { aliasTo[a] = u.primaryEmail.toLowerCase(); }));
   R.groups.forEach(g => splitList_(g.aliases + ';' + g.nonEditableAliases).forEach(a => { aliasTo[a] = g.email.toLowerCase(); }));
 
+  // ---- licences (Enterprise License Manager; optional)
+  const lic = {};
+  R.licenses.filter(l => l.email && !l.error).forEach(l => { (lic[l.email] = lic[l.email] || []).push(l); });
+  const wsErr = R.licenses.find(l => l.productId === 'Google-Apps' && l.error);
+  const licOk = !wsErr && R.licenses.some(l => l.email);
+  const licenceOf = e => {
+    if (!licOk) return '';
+    const all = lic[e] || [];
+    const pick = ids => all.filter(l => ids.indexOf(l.productId) >= 0).map(l => l.skuName || l.skuId);
+    const ws = pick(['Google-Apps']);
+    if (ws.length) return ws.join('; ');
+    const other = pick(['101034']).concat(pick(['101001', '101005']));
+    return other.length ? other.join('; ') : 'No licence';
+  };
+
   const isInternal = e => e.indexOf('@') > 0 && srcDomains.has(e.split('@').pop().toLowerCase());
   const canon = e => { const x = String(e).trim().toLowerCase(); return aliasTo[x] || x; };
   const temp = e => { const x = canon(e); if (!isInternal(x)) return x; const p = x.split('@'); return `${p[0]}@${cfg.tempPrefix}${p[1]}`; };
@@ -570,6 +695,21 @@ function buildModel_(cfg) {
 
   const issues = [];
   const issue = (sev, area, obj, text, action) => issues.push([sev, area, obj, text, action]);
+
+  // ---- usage (Admin SDK Reports; optional)
+  const tenant = {};
+  R.tenantusage.forEach(r => { tenant[r.metric] = r.value; });
+  const usage = {};
+  R.userusage.forEach(r => {
+    // "What we migrate" = Gmail + Drive. Google's own total also counts Photos, which we don't migrate.
+    const g = Number(r.gmailMB), d = Number(r.driveMB);
+    r.migMB = isNaN(g) && isNaN(d) ? '' : (isNaN(g) ? 0 : g) + (isNaN(d) ? 0 : d);
+    usage[r.email.toLowerCase()] = r;
+  });
+  const usageOk = tenant.status === 'OK';
+  const gb = mb => (mb === '' || mb === undefined || isNaN(Number(mb))) ? '' : Math.round(Number(mb) / 1024 * 100) / 100;
+  if (!usageOk) issue('Info', 'Storage', '-', `Storage usage unavailable from the Reports API${tenant.detail ? ': ' + tenant.detail.slice(0, 300) : ''}`,
+                      'Usage columns are blank. Check Admin console → Reports, or re-run collection in a day or two.');
 
   // ---- users
   const userRows = R.users.slice().sort(byKey_('primaryEmail')).map(u => {
@@ -586,11 +726,26 @@ function buildModel_(cfg) {
       flags.push('missing first/last name');
       issue('High', 'Users', e, 'Missing first or last name', 'Names are required to create the destination account.');
     }
+    const licence = licenceOf(e);
+    if (licence === 'No licence' && status === 'Active') {
+      flags.push('no licence assigned');
+      issue('Low', 'Users', e, 'Active account with no Google Workspace licence', 'Confirm whether it needs a licence at the destination.');
+    }
+    if (/^Cloud Identity/.test(licence)) flags.push('Cloud Identity only (no Workspace plan)');
+    const us = usage[e];
+    const pct = us && us.usedPct !== '' ? Number(us.usedPct) : '';
+    if (pct !== '' && pct >= QUOTA_FLAG_PCT) {
+      flags.push(`${pct}% of storage quota used`);
+      issue('Low', 'Users', e, `Using ${pct}% of storage quota (Gmail + Drive: ${gb(us.migMB)} GB)`,
+            'Make sure the destination licence has enough storage for this account.');
+    }
+    if (usageOk && !us) flags.push('no usage data (new or recently changed account?)');
     const migrate = status === 'Active' && last !== null ? 'Yes' : 'Review';
     if (migrate === 'Review') issue('Medium', 'Users', e, flags.join('; '), 'Client to confirm Migrate? = Yes or No.');
     return [migrate, false, u.givenName, u.familyName, e, temp(e), e, u.orgUnitPath || '/',
       e.split('@')[0] + '@' + cfg.archivePrefix + e.split('@')[1], true, true, true, true,
-      splitList_(u.aliases).join(';'), '', status, last === null ? 'Never' : u.lastLoginTime.slice(0, 10),
+      licence, '', status, last === null ? 'Never' : u.lastLoginTime.slice(0, 10),
+      us ? gb(us.gmailMB) : '', us ? gb(us.driveMB) : '', us ? gb(us.migMB) : '', pct,
       '', '', '', flags.join('; ')];
   });
 
@@ -617,7 +772,8 @@ function buildModel_(cfg) {
     if (s.error) { flags.push('settings unreadable'); issue('Medium', 'Groups', ge, `Settings could not be read: ${s.error}`, 'Capture settings manually.'); }
     if (acc === 'Custom') flags.push('custom access settings — see settings columns');
     groupRows.push(['Yes', g.name, ge, gt, g.description, acc, ext, mbs.length,
-      splitList_(g.aliases).join(';'), '', flags.join('; ')].concat(GROUP_SETTING_COLS.map(k => s[k] || '')));
+      splitList_(g.aliases).length + splitList_(g.nonEditableAliases).length, '', flags.join('; ')]
+      .concat(GROUP_SETTING_COLS.map(k => s[k] || '')));
     const order = { OWNER: 0, MANAGER: 1, MEMBER: 2 };
     mbs.slice().sort((a, b) => (order[a.role] - order[b.role]) || a.memberEmail.localeCompare(b.memberEmail)).forEach(m => {
       const all = m.memberEmail === 'ALL_USERS_IN_ORG';
@@ -692,10 +848,70 @@ function buildModel_(cfg) {
   const ouRows = R.orgunits.slice().sort(byKey_('orgUnitPath'))
     .map(o => [o.orgUnitPath, o.name, o.parentOrgUnitPath, o.description, ouCount[o.orgUnitPath] || 0]);
 
+  // ---- aliases: one row per alias (users first, then groups), target in the first column
+  const aliasRows = [];
+  const addAliases = (target, type, editable, automatic) => {
+    const t = target.toLowerCase();
+    splitList_(editable).sort().forEach(a => aliasRows.push([t, a, type, 'User-created', temp(t), tempRaw(a), 'Yes', '',
+      isInternal(a) ? '' : 'alias domain is not a domain of this tenant']));
+    splitList_(automatic).sort().forEach(a => aliasRows.push([t, a, type, 'Automatic (domain alias)', temp(t), '',
+      'N/A (automatic)', '', `created automatically from the domain alias ${a.split('@')[1]}; not exported`]));
+  };
+  R.users.slice().sort(byKey_('primaryEmail')).forEach(u => addAliases(u.primaryEmail, 'User', u.aliases, u.nonEditableAliases));
+  R.groups.slice().sort(byKey_('email')).forEach(g => addAliases(g.email, 'Group', g.aliases, g.nonEditableAliases));
+  const nAuto = aliasRows.filter(r => r[3] !== 'User-created').length;
+  if (nAuto) issue('Info', 'Aliases', '-', `${nAuto} automatic alias(es) come from domain aliases`,
+                   'They are recreated by Google when the domain alias exists at the destination, so they are not exported.');
+  const primaryDomains = R.domains.filter(d => d.type !== 'alias').map(d => d.domainName.toLowerCase());
+  if (primaryDomains.length > 1) issue('Info', 'Tenant', primaryDomains.join(', '), 'The source tenant has more than one domain',
+    `The destination needs every placeholder domain added and verified: ${primaryDomains.map(d => cfg.tempPrefix + d).join(', ')}.`);
+
+  // ---- licence summary (Read Me)
+  const licCount = {};
+  userRows.forEach(r => { if (r[13]) licCount[r[13]] = (licCount[r[13]] || 0) + 1; });
+  const licSummary = Object.keys(licCount).sort((a, b) => licCount[b] - licCount[a]).map(k => `${k} (${licCount[k]})`).join(', ');
+  if (!licOk) issue('Info', 'Licences', '-', `Licence data unavailable${wsErr ? ': ' + wsErr.error.slice(0, 300) : ''}`,
+                    'The licence column is blank. Check licences in Admin console → Billing → Licence settings.');
+
+  // ---- storage summary (tenant totals from the Reports API + sums of the per-user figures)
+  const fmtGB = mb => { const v = gb(mb); return v === '' ? 'n/a' : `${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} GB`; };
+  const sumMB = list => list.reduce((t, r) => t + (Number((usage[r[4]] || {}).migMB) || 0), 0);
+  const storageRows = [];
+  const tenantMigMB = ['gmail_used_quota_in_mb', 'drive_used_quota_in_mb', 'team_drive_used_quota_in_mb']
+    .reduce((t, k) => t + (Number(tenant[k]) || 0), 0);
+  if (usageOk) {
+    const quota = Number(tenant.total_quota_in_mb);
+    storageRows.push(
+      ['Report date (Pacific time)', tenant.reportDate, 'Google storage reports lag 1–3 days behind today.'],
+      ['TENANT TOTALS', '', ''],
+      ['Total to migrate', fmtGB(tenantMigMB), 'Gmail + My Drive + shared drives (Google Photos is not migrated and is excluded)'],
+      ['Gmail', fmtGB(tenant.gmail_used_quota_in_mb), ''],
+      ['Drive (My Drive)', fmtGB(tenant.drive_used_quota_in_mb), ''],
+      ['Shared drives (all)', fmtGB(tenant.team_drive_used_quota_in_mb), 'Google provides no per-drive figure; see the CloudM scan for per-drive sizes'],
+      ['Total storage quota', quota > 0 ? fmtGB(quota) : 'Not reported', quota > 0 ? '' : 'Google reports no fixed quota for some editions'],
+      ['Users (per report)', String(tenant.num_users || ''), ''],
+      [`Users using ${QUOTA_FLAG_PCT}% or more of quota`, String(tenant.num_users_used_quota_ge_80percent || '0'), ''],
+      ['Users using 50–80% of quota', String(tenant.num_users_used_quota_ge_50_lt_80percent || '0'), ''],
+      ['', '', ''],
+      ['USER ACCOUNTS: Gmail + Drive (sum of per-user figures)', '', ''],
+      ['All user accounts', fmtGB(sumMB(userRows)),
+        `${userRows.length} accounts (${userRows.filter(r => usage[r[4]]).length} with usage data)`],
+      ['Default Migrate? = Yes', fmtGB(sumMB(userRows.filter(r => r[0] === 'Yes'))), `${userRows.filter(r => r[0] === 'Yes').length} accounts`],
+      ['Default Migrate? = Review', fmtGB(sumMB(userRows.filter(r => r[0] === 'Review'))), 'Suspended, archived or never-signed-in accounts awaiting a decision'],
+      ['', '', ''],
+      ['LARGEST ACCOUNTS (Gmail + Drive)', '', '']);
+    userRows.filter(r => usage[r[4]]).sort((a, b) => (Number(usage[b[4]].migMB) || 0) - (Number(usage[a[4]].migMB) || 0))
+      .slice(0, 10).forEach((r, i) => storageRows.push([`${i + 1}. ${r[4]}`, fmtGB(usage[r[4]].migMB),
+        `Gmail ${fmtGB(usage[r[4]].gmailMB)} · Drive ${fmtGB(usage[r[4]].driveMB)} · ${r[15]}`]));
+  } else {
+    storageRows.push(['Storage usage', 'Unavailable', tenant.detail || 'The Reports API returned no data for the last 7 days.']);
+  }
+
   const sev = { High: 0, Medium: 1, Low: 2, Info: 3 };
   issues.sort((a, b) => (sev[a[0]] - sev[b[0]]) || a[1].localeCompare(b[1]) || a[2].localeCompare(b[2]));
   return { users: userRows, groups: groupRows, gmembers: gmemberRows, memberships: membershipRows,
-           drives: driveRows, dacl: daclRows, ous: ouRows, issues: issues, tempRaw: tempRaw };
+           drives: driveRows, dacl: daclRows, ous: ouRows, storage: storageRows, aliases: aliasRows, issues: issues, tempRaw: tempRaw,
+           tenantUsage: usageOk ? tenant : null, tenantMigMB: tenantMigMB, fmtGB: fmtGB, licSummary: licSummary };
 }
 
 /** Best-effort mapping of Groups Settings to Admin console "access type" presets; anything else = Custom. */
@@ -725,9 +941,15 @@ function writeTab_(ss, name, cols, rows, opt) {
   const last = Math.max(rows.length, 1) + 1;
   if (rows.length) {
     const checkbox = new Set((opt.checkbox || []).map(h => headers.indexOf(h)));
-    // Text format everywhere except checkbox columns, so IDs/emails are never coerced.
-    headers.forEach((h, i) => { if (!checkbox.has(i)) sh.getRange(2, i + 1, rows.length, 1).setNumberFormat('@'); });
-    sh.getRange(2, 1, rows.length, n).setValues(rows.map(r => r.map((v, i) => checkbox.has(i) ? !!v : (v === null || v === undefined ? '' : String(v)))));
+    const numFmt = {};
+    Object.keys(opt.number || {}).forEach(h => { numFmt[headers.indexOf(h)] = opt.number[h]; });
+    // Text format everywhere except checkbox/number columns, so IDs/emails are never coerced.
+    headers.forEach((h, i) => { if (!checkbox.has(i)) sh.getRange(2, i + 1, rows.length, 1).setNumberFormat(i in numFmt ? numFmt[i] : '@'); });
+    sh.getRange(2, 1, rows.length, n).setValues(rows.map(r => r.map((v, i) => {
+      if (checkbox.has(i)) return !!v;
+      if (i in numFmt) return v === '' || v === null || v === undefined || isNaN(Number(v)) ? '' : Number(v);
+      return v === null || v === undefined ? '' : String(v);
+    })));
     checkbox.forEach(i => sh.getRange(2, i + 1, rows.length, 1).insertCheckboxes());
     const fi = headers.indexOf('Flags');
     if (fi >= 0) sh.getRange(2, fi + 1, rows.length, 1).setBackgrounds(rows.map(r => [r[fi] ? '#F8CBAD' : null]));
@@ -772,6 +994,11 @@ function writeReadme_(sh, cfg, m) {
     [`Groups: ${m.groups.length} (${m.gmembers.length} memberships)`, ''],
     [`Shared drives: ${m.drives.length} (${m.dacl.length} sharing entries)`, ''],
     [`Org units: ${m.ous.length}`, ''],
+    [`Aliases: ${m.aliases.length} (see the Aliases tab)`, ''],
+    [`Licences: ${m.licSummary || 'not available'}`, ''],
+    [m.tenantUsage ? `Storage to migrate: ${m.fmtGB(m.tenantMigMB)} in total (Gmail ${m.fmtGB(m.tenantUsage.gmail_used_quota_in_mb)}, ` +
+      `Drive ${m.fmtGB(m.tenantUsage.drive_used_quota_in_mb)}, shared drives ${m.fmtGB(m.tenantUsage.team_drive_used_quota_in_mb)}) ` +
+      `as of ${m.tenantUsage.reportDate}. See the Storage Summary tab.` : 'Storage used: not available (see Issues to Resolve)', ''],
     [`Issues: ${m.issues.length} (${high} high priority)`, ''],
     ['', ''],
     ['Sign-off', 'h'],
@@ -825,9 +1052,10 @@ function menuExport() {
   catch (e) { ui.alert(`Cannot open the review spreadsheet in Settings → "Review spreadsheet URL":\n${e.message}`); return; }
 
   const users = readTab_(rv, T.users), groups = readTab_(rv, T.groups), gmembers = readTab_(rv, T.gmembers);
-  const drives = readTab_(rv, T.drives), dacl = readTab_(rv, T.dacl);
-  if (!users || !groups || !gmembers || !drives || !dacl) {
-    ui.alert('The review spreadsheet is missing one of its tabs. Point Settings → "Review spreadsheet URL" at the approved review spreadsheet.');
+  const drives = readTab_(rv, T.drives), dacl = readTab_(rv, T.dacl), aliases = readTab_(rv, T.aliases);
+  if (!users || !groups || !gmembers || !drives || !dacl || !aliases) {
+    ui.alert('The review spreadsheet is missing one of its tabs (for example "Aliases", added in v2.2.0). Point Settings → ' +
+             '"Review spreadsheet URL" at the approved review spreadsheet. If it was built with an older version of the tool, run step 2 again.');
     return;
   }
 
@@ -909,25 +1137,24 @@ function menuExport() {
     ous.map(o => [o.orgUnitPath, o.name, o.parentOrgUnitPath || '/', o.description]));
 
   // 5. Destination users
-  const tempAlias = a => { const p = lc(a).split('@'); return p.length === 2 ? `${p[0]}@${cfg.tempPrefix}${p[1]}` : ''; };
   files['dest_users.csv'] = toCsv_(
-    ['email', 'firstName', 'lastName', 'password', 'orgUnitPath', 'aliases', 'sourceEmail', 'finalEmail', 'sourceAfterCutover'],
+    ['email', 'firstName', 'lastName', 'password', 'orgUnitPath', 'sourceLicence', 'sourceEmail', 'finalEmail', 'sourceAfterCutover',
+     'sourceGmailGB', 'sourceDriveGB', 'sourceGmailPlusDriveGB'],
     incUsers.map(u => [lc(u['[Destination] Temp Google Account']), u['First Name'], u['Last Name'],
-      pw[lc(u['[Destination] Temp Google Account'])], u['OU Path'] || '/',
-      splitList_(u['Email Alias in [Destination] Google Workspace']).map(tempAlias).filter(Boolean).join(';'),
-      lc(u['[Source] Original Google Account']), lc(u['[Destination] Final Google Account']), lc(u['[Source] Email address after cutover'])]));
+      pw[lc(u['[Destination] Temp Google Account'])], u['OU Path'] || '/', u['Google Workspace licence'],
+      lc(u['[Source] Original Google Account']), lc(u['[Destination] Final Google Account']), lc(u['[Source] Email address after cutover']),
+      num_(u['Gmail (GB)']), num_(u['Drive (GB)']), num_(u['Gmail + Drive (GB)'])]));
 
   // 6. Destination groups (+ settings, with the client's external-posting decision applied)
   files['dest_groups.csv'] = toCsv_(
-    ['email', 'name', 'description', 'aliases', 'sourceEmail'].concat(GROUP_SETTING_COLS),
+    ['email', 'name', 'description', 'sourceEmail'].concat(GROUP_SETTING_COLS),
     incGroups.map(g => {
       const s = GROUP_SETTING_COLS.map(k => g[k]);
       const ext = String(g['Do you need external users to send emails to the group?']).trim();
       const pi = GROUP_SETTING_COLS.indexOf('whoCanPostMessage');
       if (ext === 'Yes') s[pi] = 'ANYONE_CAN_POST';
       if (ext === 'No' && s[pi] === 'ANYONE_CAN_POST') s[pi] = 'ALL_IN_DOMAIN_CAN_POST';
-      return [lc(g['[Destination] Temp group email']), g['Group Name'], g['Description'],
-              splitList_(g['Group aliases']).map(tempAlias).join(';'), lc(g['[Source] Group email'])].concat(s);
+      return [lc(g['[Destination] Temp group email']), g['Group Name'], g['Description'], lc(g['[Source] Group email'])].concat(s);
     }));
 
   // 7. Group members (only migrated groups; members excluded from migration are skipped)
@@ -945,6 +1172,23 @@ function menuExport() {
                  String(m['Member type']).indexOf('Group') === 0 ? 'GROUP' : 'USER']);
   });
   files['dest_group_members.csv'] = toCsv_(['groupEmail', 'memberEmail', 'role', 'type'], gmRows);
+
+  // 7b. Aliases, one per row. Alias/Target/TargetType match GAM's own alias terms:
+  //     gam csv dest_aliases.csv gam create alias "~Alias" "~TargetType" "~Target"
+  const aliasRows = [], aliasSeen = {};
+  const primaries = new Set(Array.from(allTemp));
+  aliases.forEach(a => {
+    if (String(a['Alias type']).indexOf('User-created') !== 0) return;          // automatic aliases are recreated by Google
+    const src = a['[Source] Alias'], tgt = lc(a['[Destination] Target']), dst = lc(a['[Destination] Alias']);
+    if (String(a['Migrate alias?']).trim() !== 'Yes') return;
+    if (!incTemp.has(tgt)) { warn.push(`Alias ${src} skipped: its ${String(a['Target type']).toLowerCase()} ${a['[Source] Target (user or group)']} is not being migrated.`); return; }
+    if (!dst || dst.indexOf('@') < 0) { warn.push(`Alias ${src} skipped: no destination alias address.`); return; }
+    if (primaries.has(dst)) { warn.push(`Alias ${dst} skipped: it is also the address of a user or group.`); return; }
+    if (aliasSeen[dst]) { warn.push(`Alias ${dst} skipped: listed more than once (targets ${aliasSeen[dst]} and ${tgt}).`); return; }
+    aliasSeen[dst] = tgt;
+    aliasRows.push([dst, tgt, String(a['Target type']).toLowerCase() === 'group' ? 'group' : 'user', lc(src), lc(a['[Source] Target (user or group)'])]);
+  });
+  files['dest_aliases.csv'] = toCsv_(['Alias', 'Target', 'TargetType', 'SourceAlias', 'SourceTarget'], aliasRows);
 
   // 8. Destination shared drives + ACLs
   files['dest_shared_drives.csv'] = toCsv_(['name', 'sourceDriveId', 'sourceName'],
@@ -972,7 +1216,13 @@ function menuExport() {
   });
 
   // 9. README
-  files['README.txt'] = exportReadme_(cfg, rv, signer, incUsers.length, incGroups.length, incDrives.length, warn);
+  const hasUsage = incUsers.some(u => num_(u['Gmail + Drive (GB)']) !== '');
+  const sumGB = k => Math.round(incUsers.reduce((t, u) => t + (Number(num_(u[k])) || 0), 0) * 100) / 100;
+  const storageLine = hasUsage
+    ? `Source storage of included users (Gmail + Drive): ${sumGB('Gmail + Drive (GB)')} GB (Gmail ${sumGB('Gmail (GB)')} GB, Drive ${sumGB('Drive (GB)')} GB). ` +
+      'Shared drive sizes are not available from Google APIs; use the CloudM scan.'
+    : 'Source storage: not available in this review.';
+  files['README.txt'] = exportReadme_(cfg, rv, signer, incUsers.length, incGroups.length, incDrives.length, warn, storageLine);
 
   // ---- zip -> Drive
   const stamp = Utilities.formatDate(new Date(), 'Etc/UTC', 'yyyyMMdd-HHmm');
@@ -1026,6 +1276,9 @@ function signOffValue_(ss, label) {
   return row ? String(row[1] || '').trim() : '';
 }
 
+/** Number from a review cell ('' if blank or not numeric). */
+function num_(v) { return v === '' || v === null || v === undefined || isNaN(Number(v)) ? '' : Number(v); }
+
 function isYesNo_(v) { return v === 'Yes' || v === 'No'; }
 function tf_(v) { return v === true || truthy_(v) ? 'True' : 'False'; }
 
@@ -1057,13 +1310,14 @@ function randInt_(max) {
   }
 }
 
-function exportReadme_(cfg, rv, signer, nu, ng, nd, warn) {
+function exportReadme_(cfg, rv, signer, nu, ng, nd, warn, storageLine) {
   return [
     `${cfg.project}: migration files`,
     `Generated: ${new Date().toISOString()}`,
     `From review: ${rv.getName()}  (${rv.getUrl()})`,
     `Approved by: ${signer || '(sign-off not completed)'}`,
     `Included: ${nu} users, ${ng} groups, ${nd} shared drives`,
+    storageLine,
     '',
     'CLOUDM MIGRATE',
     '  cloudm_users.csv                 Bulk Add/Import Items: users (source -> placeholder). CONTAINS TEMP PASSWORDS.',
@@ -1073,8 +1327,10 @@ function exportReadme_(cfg, rv, signer, nu, ng, nd, warn) {
     '',
     'DESTINATION BUILD (1:1 copy of the source on placeholder addresses)',
     '  dest_org_units.csv               OUs to create, parents first.',
-    '  dest_users.csv                   Users to create (same passwords as the CloudM file), OU and aliases.',
+    '  dest_users.csv                   Users to create (same passwords as the CloudM file), OU, source licence, source storage (GB).',
     '  dest_groups.csv                  Groups to create, with source settings.',
+    '  dest_aliases.csv                 User and group aliases, one per row (Alias, Target, TargetType). For GAM:',
+    '                                   gam csv dest_aliases.csv gam create alias "~Alias" "~TargetType" "~Target"',
     '  dest_group_members.csv           Group memberships and roles (OWNER/MANAGER/MEMBER).',
     '  dest_shared_drives.csv           Shared drives to create.',
     '  dest_shared_drive_acl.csv        Shared drive members (Drive API roles: organizer, fileOrganizer, writer, commenter, reader).',
